@@ -432,7 +432,7 @@ int main(int argc, char* argv[])
 {
 	if (argc < 2)
 	{
-		printf("Usage: MySqlBench hostname\n");
+		printf("Usage: MySqlBench hostname[:port]\n");
 		return 2;
 	}
 
@@ -446,7 +446,16 @@ int main(int argc, char* argv[])
 	hints.ai_protocol = IPPROTO_TCP;
 
 	// Resolve the server address and port
-	if (getaddrinfo(argv[1], "3306", &hints, &result) != 0)
+	auto hostname = argv[1];
+	auto colon = strchr(hostname, ':');
+	auto port = "3306";
+	if (colon != nullptr)
+	{
+		*colon = 0;
+		port = colon + 1;
+	}
+	printf("host: %s\nport: %s\n", hostname, port);
+	if (getaddrinfo(hostname, port, &hints, &result) != 0)
 		Fatal("getaddrinfo failed");
 
 	g_iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, 0, 0, 0);
