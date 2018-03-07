@@ -237,6 +237,8 @@ OVERLAPPED g_overlapped;
 RIO_EXTENSION_FUNCTION_TABLE g_rio;
 const size_t BufferSize = 65536;
 unsigned long long g_queries;
+bool g_threadAffinity;
+int g_selectStatement = 2;
 
 void ProcessPacket(Connection * connection, const RIORESULT result)
 {
@@ -368,30 +370,47 @@ void ProcessPacket(Connection * connection, const RIORESULT result)
 	return;
 
 SendQuery:
-	uint8_t * output = connection->Buffer;
-	*output++ = 53;
-	*output++ = 0;
-	*output++ = 0;
-	*output++ = 0;
-
-	strcpy((char*)output, "\x03SELECT id, randomNumber FROM world WHERE Id =      ;");
+	*reinterpret_cast<uint32_t*>(connection->Buffer) = 0;
+	uint8_t * output = connection->Buffer + 4;
+	*output++ = 3;
 	unsigned int value;
-	rand_s(&value);
-	for (int i = 0; i < 4; i++)
+	int statementLength = 0;
+	switch (g_selectStatement)
 	{
-		output[51 - i] = '0' + (value % 10);
-		value /= 10;
+	case 1:
+		statementLength = 9;
+		strcpy((char*)output, "SELECT 1;");
+		break;
+
+	case 2:
+		statementLength = 52;
+		strcpy((char*)output, "SELECT id, randomNumber FROM world WHERE Id =      ;");
+		rand_s(&value);
+		for (int i = 0; i < 4; i++)
+		{
+			output[51 - i] = '0' + (value % 10);
+			value /= 10;
+		}
+		break;
 	}
+
+	*connection->Buffer = static_cast<uint8_t>(statementLength + 1);
 	connection->RioBuffer.Offset = 0;
-	connection->RioBuffer.Length = 57;
+	connection->RioBuffer.Length = statementLength + 5;
 	connection->State = ConnectionState::SendingQuery;
 	if (g_rio.RIOSend(connection->RequestQueue, &connection->RioBuffer, 1, 0, 0) == FALSE)
 		Fatal("Sending query failed");
 }
 
 
-DWORD WINAPI ThreadProc(void *)
+DWORD WINAPI ThreadProc(void * lpParameter)
 {
+	if (g_threadAffinity)
+	{
+		auto core = (DWORD_PTR)lpParameter;
+		SetThreadAffinityMask(GetCurrentThread(), 1ull << core);
+	}
+
 	while (true)
 	{
 		DWORD numberOfBytesTransferred;
@@ -432,8 +451,24 @@ int main(int argc, char* argv[])
 {
 	if (argc < 2)
 	{
-		printf("Usage: MySqlBench hostname[:port]\n");
+		printf("Usage: MySqlBench [-a12] hostname[:port]\n  -a use thread affinity for IOCP\n  -1 use 'SELECT 1;'\n  -2 use 'SELECT id, randomNumber'\n");
 		return 2;
+	}
+
+	// simplistic command-line parsing
+	auto hostname = argv[1];
+	if (argc == 3 && argv[1][0] == '-')
+	{
+		hostname = argv[2];
+		for (auto option = &argv[1][1]; *option != 0; ++option)
+		{
+			if (*option == 'a')
+				g_threadAffinity = true;
+			else if (*option == '1')
+				g_selectStatement = 1;
+			else if (*option == '2')
+				g_selectStatement = 2;
+		}
 	}
 
 	WSADATA wsaData;
@@ -446,7 +481,6 @@ int main(int argc, char* argv[])
 	hints.ai_protocol = IPPROTO_TCP;
 
 	// Resolve the server address and port
-	auto hostname = argv[1];
 	auto colon = strchr(hostname, ':');
 	auto port = "3306";
 	if (colon != nullptr)
