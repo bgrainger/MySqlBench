@@ -31,6 +31,10 @@ enum class ConnectionState
 	ReceivingAuthOk,
 	SendingQuery,
 	ReceivingResultSet,
+	SendingStatementPrepare,
+	ReceivingPreparedStatement,
+	SendingExecuteStatement,
+	ReceivingBinaryResultSet,
 };
 
 enum class ProtocolCapabilities : uint32_t
@@ -168,6 +172,7 @@ struct Connection
 	RIO_RQ RequestQueue;
 	uint8_t* Buffer;
 	RIO_BUF RioBuffer;
+	uint32_t StatementId;
 };
 
 class PayloadReader
@@ -238,10 +243,14 @@ RIO_EXTENSION_FUNCTION_TABLE g_rio;
 const size_t BufferSize = 65536;
 unsigned long long g_queries;
 bool g_threadAffinity;
+bool g_preparedStatements;
 int g_selectStatement = 2;
 
 void ProcessPacket(Connection * connection, const RIORESULT result)
 {
+	int statementLength = 0;
+	uint8_t * output;
+
 	switch (connection->State)
 	{
 	case ConnectionState::Initial:
@@ -289,7 +298,7 @@ void ProcessPacket(Connection * connection, const RIORESULT result)
 		BCryptDestroyHash(hash);
 		BCryptCloseAlgorithmProvider(alg, 0);
 
-		uint8_t * output = connection->Buffer + 4;
+		output = connection->Buffer + 4;
 		*reinterpret_cast<uint32_t*>(output) = static_cast<uint32_t>(
 			ProtocolCapabilities::Protocol41 |
 			ProtocolCapabilities::LongPassword |
@@ -346,18 +355,53 @@ void ProcessPacket(Connection * connection, const RIORESULT result)
 		if (header != 0)
 			Fatal("couldn't log in");
 
-		goto SendQuery;
+		if (!g_preparedStatements)
+			goto SendQuery;
+
+		*reinterpret_cast<uint32_t*>(connection->Buffer) = 10;
+		strcpy((char*)(connection->Buffer + 4), "\x16SELECT 1;");
+		connection->RioBuffer.Offset = 0;
+		connection->RioBuffer.Length = *connection->Buffer + 4;
+		connection->State = ConnectionState::SendingStatementPrepare;
+		if (g_rio.RIOSend(connection->RequestQueue, &connection->RioBuffer, 1, 0, 0) == FALSE)
+			Fatal("sending statement preparation failed");
+		break;
 	}
 
-	case ConnectionState::SendingQuery:
+	case ConnectionState::SendingStatementPrepare:
 	{
+		connection->RioBuffer.Offset = 0;
+		connection->RioBuffer.Length = BufferSize;
+		connection->State = ConnectionState::ReceivingPreparedStatement;
+		if (g_rio.RIOReceive(connection->RequestQueue, &connection->RioBuffer, 1, 0, 0) == FALSE)
+			Fatal("receiving prepared statement failed");
+		break;
+	}
+
+	case ConnectionState::ReceivingPreparedStatement:
+	{
+		PayloadReader reader(connection->Buffer + connection->RioBuffer.Offset, result.BytesTransferred);
+		if (reader.ReadByte() != 0)
+			Fatal("preparing statement failed");
+		connection->StatementId = reader.Read<uint32_t>();
+		goto SendPreparedQuery;
+	}
+
+	case ConnectionState::SendingExecuteStatement:
+		connection->RioBuffer.Offset = 0;
+		connection->RioBuffer.Length = BufferSize;
+		connection->State = ConnectionState::ReceivingBinaryResultSet;
+		if (g_rio.RIOReceive(connection->RequestQueue, &connection->RioBuffer, 1, 0, 0) == FALSE)
+			Fatal("receiving binary result set failed");
+		break;
+
+	case ConnectionState::SendingQuery:
 		connection->RioBuffer.Offset = 0;
 		connection->RioBuffer.Length = BufferSize;
 		connection->State = ConnectionState::ReceivingResultSet;
 		if (g_rio.RIOReceive(connection->RequestQueue, &connection->RioBuffer, 1, 0, 0) == FALSE)
 			Fatal("receiving result set failed");
 		break;
-	}
 
 	case ConnectionState::ReceivingResultSet:
 	{
@@ -365,16 +409,22 @@ void ProcessPacket(Connection * connection, const RIORESULT result)
 		InterlockedIncrement(&g_queries);
 		goto SendQuery;
 	}
+
+	case ConnectionState::ReceivingBinaryResultSet:
+	{
+		PayloadReader reader(connection->Buffer + connection->RioBuffer.Offset, result.BytesTransferred);
+		InterlockedIncrement(&g_queries);
+		goto SendPreparedQuery;
+	}
 	}
 
 	return;
 
 SendQuery:
 	*reinterpret_cast<uint32_t*>(connection->Buffer) = 0;
-	uint8_t * output = connection->Buffer + 4;
+	output = connection->Buffer + 4;
 	*output++ = 3;
 	unsigned int value;
-	int statementLength = 0;
 	switch (g_selectStatement)
 	{
 	case 1:
@@ -400,6 +450,28 @@ SendQuery:
 	connection->State = ConnectionState::SendingQuery;
 	if (g_rio.RIOSend(connection->RequestQueue, &connection->RioBuffer, 1, 0, 0) == FALSE)
 		Fatal("Sending query failed");
+	return;
+
+SendPreparedQuery:
+	*reinterpret_cast<uint32_t*>(connection->Buffer) = 10;
+	output = connection->Buffer + 4;
+	*output++ = 0x17;
+	*output++ = connection->StatementId & 0xFF;
+	*output++ = (connection->StatementId >> 8) & 0xFF;
+	*output++ = (connection->StatementId >> 16) & 0xFF;
+	*output++ = (connection->StatementId >> 24) & 0xFF;
+	*output++ = 0;
+	*output++ = 1;
+	*output++ = 0;
+	*output++ = 0;
+	*output++ = 0;
+
+	connection->RioBuffer.Offset = 0;
+	connection->RioBuffer.Length = *connection->Buffer + 4;
+	connection->State = ConnectionState::SendingExecuteStatement;
+	if (g_rio.RIOSend(connection->RequestQueue, &connection->RioBuffer, 1, 0, 0) == FALSE)
+		Fatal("sending statement preparation failed");
+	return;
 }
 
 
@@ -468,6 +540,8 @@ int main(int argc, char* argv[])
 				g_selectStatement = 1;
 			else if (*option == '2')
 				g_selectStatement = 2;
+			else if (*option == 'p')
+				g_preparedStatements = true;
 		}
 	}
 
