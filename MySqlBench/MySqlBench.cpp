@@ -235,6 +235,7 @@ private:
 
 const char * g_userName = "benchmarkdbuser";
 const char * g_password = "benchmarkdbpass";
+const char * g_database = "hello_world";
 
 HANDLE g_iocp;
 RIO_CQ g_completionQueue;
@@ -323,8 +324,8 @@ void ProcessPacket(Connection * connection, const RIORESULT result)
 		*output++ = 20;
 		memcpy(output, hashedPassword, 20);
 		output += 20;
-		strcpy((char*)output, "hello_world");
-		output += 12;
+		strcpy((char*)output, g_database);
+		output += strlen(g_database) + 1;
 		strcpy((char*)output, "mysql_native_password");
 		output += 22;
 		uint32_t length = static_cast<uint32_t>(output - connection->Buffer - 4);
