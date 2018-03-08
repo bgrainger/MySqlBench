@@ -576,7 +576,9 @@ int main(int argc, char* argv[])
 	for (DWORD i = 0; i < sysinfo.dwNumberOfProcessors; i++)
 		CreateThread(nullptr, 0, ThreadProc, (LPVOID) (DWORD_PTR) i, 0, nullptr);
 
+#ifndef _DEBUG
 	for (DWORD i = 0; i < sysinfo.dwNumberOfProcessors * 2; i++)
+#endif
 	{
 		auto connection = new Connection();
 		connection->State = ConnectionState::Initial;
