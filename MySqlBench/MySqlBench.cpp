@@ -577,7 +577,7 @@ int main(int argc, char* argv[])
 		CreateThread(nullptr, 0, ThreadProc, (LPVOID) (DWORD_PTR) i, 0, nullptr);
 
 #ifndef _DEBUG
-	for (DWORD i = 0; i < sysinfo.dwNumberOfProcessors * 2; i++)
+	for (DWORD i = 0; i < sysinfo.dwNumberOfProcessors * 4; i++)
 #endif
 	{
 		auto connection = new Connection();
@@ -601,7 +601,7 @@ int main(int argc, char* argv[])
 			type.Iocp.IocpHandle = g_iocp;
 			type.Iocp.CompletionKey = (PVOID) 1;
 			type.Iocp.Overlapped = &g_overlapped;
-			g_completionQueue = g_rio.RIOCreateCompletionQueue(1024, &type);
+			g_completionQueue = g_rio.RIOCreateCompletionQueue(8192, &type);
 			if (g_completionQueue == RIO_INVALID_CQ)
 				Fatal("Couldn't create completion queue");
 		}
