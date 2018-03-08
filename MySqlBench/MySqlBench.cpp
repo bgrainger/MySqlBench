@@ -35,6 +35,8 @@ enum class ConnectionState
 	ReceivingPreparedStatement,
 	SendingExecuteStatement,
 	ReceivingBinaryResultSet,
+	SendingPing,
+	ReceivingPong,
 };
 
 enum class ProtocolCapabilities : uint32_t
@@ -356,6 +358,17 @@ void ProcessPacket(Connection * connection, const RIORESULT result)
 		if (header != 0)
 			Fatal("couldn't log in");
 
+		if (g_selectStatement == 3)
+		{
+			output = connection->Buffer;
+			*output++ = 1;
+			*output++ = 0;
+			*output++ = 0;
+			*output++ = 0;
+			*output++ = 0x0E;
+			goto SendPing;
+		}
+
 		if (!g_preparedStatements)
 			goto SendQuery;
 
@@ -417,6 +430,21 @@ void ProcessPacket(Connection * connection, const RIORESULT result)
 		InterlockedIncrement(&g_queries);
 		goto SendPreparedQuery;
 	}
+
+	case ConnectionState::SendingPing:
+		connection->RioBuffer.Offset = 16384;
+		connection->RioBuffer.Length = BufferSize - 16384;
+		connection->State = ConnectionState::ReceivingPong;
+		if (g_rio.RIOReceive(connection->RequestQueue, &connection->RioBuffer, 1, 0, 0) == FALSE)
+			Fatal("receiving pong failed");
+		break;
+
+	case ConnectionState::ReceivingPong:
+	{
+		PayloadReader reader(connection->Buffer + connection->RioBuffer.Offset, result.BytesTransferred);
+		InterlockedIncrement(&g_queries);
+		goto SendPing;
+	}
 	}
 
 	return;
@@ -473,6 +501,14 @@ SendPreparedQuery:
 	if (g_rio.RIOSend(connection->RequestQueue, &connection->RioBuffer, 1, 0, 0) == FALSE)
 		Fatal("sending statement preparation failed");
 	return;
+
+SendPing:
+	connection->RioBuffer.Offset = 0;
+	connection->RioBuffer.Length = 5;
+	connection->State = ConnectionState::SendingPing;
+	if (g_rio.RIOSend(connection->RequestQueue, &connection->RioBuffer, 1, 0, 0) == FALSE)
+		Fatal("sending ping failed");
+	return;
 }
 
 
@@ -524,7 +560,7 @@ int main(int argc, char* argv[])
 {
 	if (argc < 2)
 	{
-		printf("Usage: MySqlBench [-a12] hostname[:port]\n  -a use thread affinity for IOCP\n  -1 use 'SELECT 1;'\n  -2 use 'SELECT id, randomNumber'\n");
+		printf("Usage: MySqlBench [-ap12P] hostname[:port]\n  -a use thread affinity for IOCP\n  -1 use 'SELECT 1;'\n  -2 use 'SELECT id, randomNumber'\n");
 		return 2;
 	}
 
@@ -543,6 +579,8 @@ int main(int argc, char* argv[])
 				g_selectStatement = 2;
 			else if (*option == 'p')
 				g_preparedStatements = true;
+			else if (*option == 'P')
+				g_selectStatement = 3;
 		}
 	}
 
